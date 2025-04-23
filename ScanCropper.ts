@@ -74,7 +74,7 @@ export class ScanCropper {
       });
 
       // Save the image to a buffer in the desired format (e.g., PNG)
-      const imgBuffer = image.toBuffer({ format: "png" });
+      const imgBuffer = image.toBuffer({ format: this.settings.outputFormat });
 
       resultImages.push(Buffer.from(imgBuffer));
 

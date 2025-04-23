@@ -8,7 +8,7 @@ await new Promise<void>((resolve) => {
 });
 
 program
-  .requiredOption("-i, --input-dir <dir>", "Input directory")
+  .requiredOption("-i, --input <path>", "Input file or directory")
   .option("-o, --output-dir <dir>", "Output directory")
   .option("-b, --blur <n>", "Median blur kernel size", "9")
   .option("-t, --thresh <n>", "Threshold value", "250")
@@ -23,11 +23,20 @@ const settings: Settings = {
   thresh: +opts.thresh,
   maxVal: +opts.maxVal,
   writeOutput: opts.writeOutput,
-  inputDir: opts.inputDir,
+  inputDir: undefined,
   outputDir: opts.outputDir,
   outputFormat: opts.format === "jpg" ? "jpg" : "png",
 };
 
 const cropper = new ScanCropper(settings);
 await cropper.init();
-await cropper.processAllFromDir(opts.inputDir);
+
+const inputStat = await Deno.stat(opts.input);
+if (inputStat.isDirectory) {
+  await cropper.processAllFromDir(opts.input);
+} else if (inputStat.isFile) {
+  await cropper.processFilePath(opts.input);
+} else {
+  console.error("Invalid input path.");
+  Deno.exit(1);
+}
