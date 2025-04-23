@@ -1,8 +1,8 @@
 import { basename, extname, join } from "https://deno.land/std/path/mod.ts";
 import cv from "npm:@techstark/opencv-js";
-import sharp from "npm:sharp";
 import { Buffer } from "node:buffer";
 import { Settings } from "./types.ts";
+import { Image } from "npm:image-js";
 
 export class ScanCropper {
   private errors = 0;
@@ -25,20 +25,26 @@ export class ScanCropper {
 
   async processBuffer(buffer: Uint8Array, name = "scan") {
     this.images++;
-    const { data, info } = await sharp(buffer)
-      .ensureAlpha()
-      .toColourspace("rgba")
-      .raw()
-      .toBuffer({ resolveWithObject: true });
+    // Load the image from a buffer
+    const image = await Image.load(buffer);
 
-    const rgba = cv.matFromImageData({
-      data,
-      width: info.width,
-      height: info.height,
-    });
+    // Ensure the image has an alpha channel and convert to RGBA
+    const rgbaImage = image.rgba8();
+
+    // Access raw pixel data
+    const data = rgbaImage.data;
+    const width = rgbaImage.width;
+    const height = rgbaImage.height;
+
+    // Create an OpenCV Mat from the image data
+    const rgbaMat = cv.matFromImageData(
+      new ImageData(new Uint8ClampedArray(data), width, height),
+    );
+
+    // Convert RGBA to BGR color space
     const bgr = new cv.Mat();
-    cv.cvtColor(rgba, bgr, cv.COLOR_RGBA2BGR);
-    rgba.delete();
+    cv.cvtColor(rgbaMat, bgr, cv.COLOR_RGBA2BGR);
+    rgbaMat.delete();
 
     if (bgr.empty()) {
       console.warn(`Could not decode image`);
@@ -60,12 +66,17 @@ export class ScanCropper {
       cv.cvtColor(scan, rgb, cv.COLOR_BGR2RGB);
       scan.delete();
 
-      const imgBuf = await sharp(Buffer.from(rgb.data), {
-        raw: { width: rgb.cols, height: rgb.rows, channels: 3 },
-      })
-        .toFormat(this.settings.outputFormat)
-        .toBuffer();
-      resultImages.push(imgBuf);
+      // Create an Image instance from the RGB data
+      const image = new Image(rgb.cols, rgb.rows, {
+        data: rgb.data,
+        components: 3,
+        alpha: 0,
+      });
+
+      // Save the image to a buffer in the desired format (e.g., PNG)
+      const imgBuffer = image.toBuffer({ format: "png" });
+
+      resultImages.push(Buffer.from(imgBuffer));
 
       rgb.delete();
       if (this.settings.writeOutput && this.settings.outputDir) {
@@ -73,7 +84,7 @@ export class ScanCropper {
           this.settings.outputDir,
           `${name}_${i}.${this.settings.outputFormat}`,
         );
-        await Deno.writeFile(outPath, imgBuf);
+        await Deno.writeFile(outPath, imgBuffer);
         console.log(`→ ${outPath}`);
       }
     }
