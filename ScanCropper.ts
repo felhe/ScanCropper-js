@@ -1,6 +1,5 @@
 import { basename, extname, join } from "https://deno.land/std/path/mod.ts";
 import cv from "npm:@techstark/opencv-js";
-import { Buffer } from "node:buffer";
 import { Settings } from "./types.ts";
 import { Image } from "npm:image-js";
 
@@ -53,7 +52,7 @@ export class ScanCropper {
     }
 
     const scans = this.findScans(bgr);
-    const resultImages: Buffer[] = [];
+    const resultImages: Uint8Array[] = [];
     for (let i = 0; i < scans.length; i++) {
       const scan = scans[i];
       if (scan.empty()) {
@@ -76,7 +75,7 @@ export class ScanCropper {
       // Save the image to a buffer in the desired format (e.g., PNG)
       const imgBuffer = image.toBuffer({ format: this.settings.outputFormat });
 
-      resultImages.push(Buffer.from(imgBuffer));
+      resultImages.push(imgBuffer);
 
       rgb.delete();
       if (this.settings.writeOutput && this.settings.outputDir) {
