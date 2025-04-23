@@ -1,5 +1,5 @@
-import { ScanCropper } from "./ScanCropper.ts";
-import { Settings } from "./types.ts";
+import { ScanCropper } from "./src/ScanCropper.ts";
+import { Settings } from "./src/Settings.ts";
 
 (async () => {
   const settings: Settings = {

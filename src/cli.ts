@@ -1,11 +1,6 @@
 import { program } from "npm:commander";
-import cv from "npm:@techstark/opencv-js";
 import { ScanCropper } from "./ScanCropper.ts";
-import { Settings } from "./types.ts";
-
-await new Promise<void>((resolve) => {
-  cv.onRuntimeInitialized = resolve;
-});
+import { Settings } from "./Settings.ts";
 
 program
   .requiredOption("-i, --input <path>", "Input file or directory")

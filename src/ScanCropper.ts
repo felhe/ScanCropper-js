@@ -1,6 +1,6 @@
 import { basename, extname, join } from "https://deno.land/std/path/mod.ts";
 import cv from "npm:@techstark/opencv-js";
-import { Settings } from "./types.ts";
+import { Settings } from "./Settings.ts";
 import { Image } from "npm:image-js";
 
 export class ScanCropper {
