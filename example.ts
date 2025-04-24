@@ -11,9 +11,8 @@ import { Settings } from "./src/Settings.ts";
   };
 
   const cropper = new ScanCropper(settings);
-  await cropper.init();
 
   const buffer = await Deno.readFile("./images/input/Scan.png");
-  const result = await cropper.processBuffer(buffer, "manual");
+  const result = await cropper.processBuffer(buffer);
   console.log(result);
 })();

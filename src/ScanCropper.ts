@@ -1,4 +1,3 @@
-import { basename, extname, join } from "https://deno.land/std/path/mod.ts";
 import cv from "npm:@techstark/opencv-js";
 import { Settings } from "./Settings.ts";
 import { Image } from "npm:image-js";
@@ -10,19 +9,7 @@ export class ScanCropper {
 
   constructor(private settings: Settings) {}
 
-  async init() {
-    if (this.settings.writeOutput && this.settings.outputDir) {
-      await Deno.mkdir(this.settings.outputDir, { recursive: true });
-    }
-  }
-
-  async processFilePath(filePath: string) {
-    const buffer = await Deno.readFile(filePath);
-    const filename = basename(filePath, extname(filePath));
-    await this.processBuffer(buffer, filename);
-  }
-
-  async processBuffer(buffer: Uint8Array, name = "scan") {
+  async processBuffer(buffer: Uint8Array) {
     this.images++;
     // Load the image from a buffer
     const image = await Image.load(buffer);
@@ -37,7 +24,7 @@ export class ScanCropper {
 
     // Create an OpenCV Mat from the image data
     const rgbaMat = cv.matFromImageData(
-      new ImageData(new Uint8ClampedArray(data), width, height),
+      { data: new Uint8ClampedArray(data), width, height },
     );
 
     // Convert RGBA to BGR color space
@@ -78,39 +65,11 @@ export class ScanCropper {
       resultImages.push(imgBuffer);
 
       rgb.delete();
-      if (this.settings.writeOutput && this.settings.outputDir) {
-        const outPath = join(
-          this.settings.outputDir,
-          `${name}_${i}.${this.settings.outputFormat}`,
-        );
-        await Deno.writeFile(outPath, imgBuffer);
-        console.log(`→ ${outPath}`);
-      }
     }
 
     bgr.delete();
 
     return resultImages;
-  }
-
-  async processAllFromDir(dirPath: string) {
-    const files: string[] = [];
-    for await (const entry of Deno.readDir(dirPath)) {
-      if (entry.isFile) {
-        const ext = extname(entry.name).toLowerCase();
-        if ([".jpg", ".jpeg", ".png", ".tiff"].includes(ext)) {
-          files.push(join(dirPath, entry.name));
-        }
-      }
-    }
-
-    for (const file of files) {
-      await this.processFilePath(file);
-    }
-
-    console.log(
-      `Done: ${this.images} images → ${this.scans} scans (${this.errors} errors)`,
-    );
   }
 
   private getCandidateRegions(
