@@ -7,7 +7,7 @@ export class ScanCropper {
   private scans = 0;
   private errors = 0;
 
-  // Reusable Mats for the pipeline:
+  // Reusable Mats for intermediates
   private matSrc: cv.Mat | null = null;
   private matGray: cv.Mat | null = null;
   private matBin: cv.Mat | null = null;
@@ -27,30 +27,33 @@ export class ScanCropper {
 
     // 1) Load & one‐time RGBA conversion
     const srcImage = await Image.load(buffer);
-    const rgba = srcImage.rgba8(); // Heavy, only do once
+    const rgba = srcImage.rgba8();
     const imgData = new ImageData(
       new Uint8ClampedArray(rgba.data),
       rgba.width,
       rgba.height,
     );
 
-    // 2) Create source Mat once
-    this.matSrc = cv.matFromImageData(imgData);
+    // 2) Create RGBA Mat → convert to true BGR Mat
+    const matRGBA = cv.matFromImageData(imgData);
+    this.matSrc = new cv.Mat();
+    cv.cvtColor(matRGBA, this.matSrc, cv.COLOR_RGBA2BGR);
+    matRGBA.delete();
 
-    // 3) Allocate or reuse intermediate Mats
+    // 3) Allocate or reuse intermediates
     this.matGray = this.matGray || new cv.Mat();
     this.matBin = this.matBin || new cv.Mat();
     this.contours = this.contours || new cv.MatVector();
     this.hierarchy = this.hierarchy || new cv.Mat();
 
-    // 4) Blur → Gray → Threshold
+    // 4) Blur → Gray → Threshold (on BGR source)
     const blurred = new cv.Mat();
     try {
-      cv.medianBlur(this.matSrc, blurred, this.settings.blur);
-      cv.cvtColor(blurred, this.matGray, cv.COLOR_BGR2GRAY);
+      cv.medianBlur(this.matSrc!, blurred, this.settings.blur);
+      cv.cvtColor(blurred, this.matGray!, cv.COLOR_BGR2GRAY);
       cv.threshold(
-        this.matGray,
-        this.matBin,
+        this.matGray!,
+        this.matBin!,
         this.settings.thresh,
         this.settings.maxVal,
         cv.THRESH_BINARY_INV,
@@ -61,18 +64,18 @@ export class ScanCropper {
 
     // 5) Find contours
     cv.findContours(
-      this.matBin,
-      this.contours,
-      this.hierarchy,
+      this.matBin!,
+      this.contours!,
+      this.hierarchy!,
       cv.RETR_EXTERNAL,
       cv.CHAIN_APPROX_SIMPLE,
     );
 
     // 6) Candidate regions & clipping
-    const regions = this.getCandidateRegions(this.matSrc, this.contours);
-    const scanMats = this.clipScans(this.matSrc, regions);
+    const regions = this.getCandidateRegions(this.matSrc!, this.contours!);
+    const scanMats = this.clipScans(this.matSrc!, regions);
 
-    // 7) Convert each Mat ROI → Image-JS buffer
+    // 7) Convert each ROI (BGR) → RGB buffer
     const outBuffers: Uint8Array[] = [];
     for (const roi of scanMats) {
       if (roi.empty()) {
@@ -81,12 +84,10 @@ export class ScanCropper {
       }
       this.scans++;
 
-      // Convert BGR→RGB into a buffer
       const rgb = new cv.Mat();
       cv.cvtColor(roi, rgb, cv.COLOR_BGR2RGB);
       roi.delete();
 
-      // Build Image-JS from rgb.data without extra copies
       const img = new Image(rgb.cols, rgb.rows, {
         data: rgb.data,
         components: 3,
@@ -96,7 +97,10 @@ export class ScanCropper {
       rgb.delete();
     }
 
-    // 8) Yield so GC can run before next heavy iteration
+    // 8) Clean up source Mat
+    this.matSrc.delete();
+
+    // 9) Yield to let GC/Emscripten reclaim memory
     await new Promise((r) => setTimeout(r, 0));
 
     return outBuffers;
@@ -113,7 +117,7 @@ export class ScanCropper {
     for (let i = 0; i < contours.size(); i++) {
       const cnt = contours.get(i);
       const rect = cv.minAreaRect(cnt);
-      // @ts-ignore: points() is incorrectly typed
+      // @ts-ignore: points() typing is off
       const pts: number[][] = cv.RotatedRect.points(rect);
       const area = rect.size.width * rect.size.height;
 
@@ -121,7 +125,6 @@ export class ScanCropper {
         const box = cv.matFromArray(4, 1, cv.CV_32SC2, pts.flat());
         regions.push({ box, rect, area });
       }
-
       cnt.delete();
     }
 
@@ -148,8 +151,8 @@ export class ScanCropper {
         rotated = this.rotateImage(img, angle, center);
 
         const rpts = this.rotatePoints(pts, angle, center);
-        const xs = rpts.map((p) => p.x),
-          ys = rpts.map((p) => p.y);
+        const xs = rpts.map((p) => p.x);
+        const ys = rpts.map((p) => p.y);
 
         const x1 = Math.max(Math.min(...xs), 0),
           y1 = Math.max(Math.min(...ys), 0),
@@ -201,8 +204,8 @@ export class ScanCropper {
     angleDeg: number,
     center: { x: number; y: number },
   ) {
-    const rad = -angleDeg * (Math.PI / 180),
-      sin = Math.sin(rad),
+    const rad = -angleDeg * (Math.PI / 180);
+    const sin = Math.sin(rad),
       cos = Math.cos(rad);
 
     return pts.map(({ x, y }) => {
