@@ -7,7 +7,17 @@ export class ScanCropper {
   private images = 0;
   private scans = 0;
 
-  constructor(private settings: Settings) {}
+  constructor(private settings: Settings) {
+  }
+
+  async init() {
+    // Load OpenCV.js
+    await new Promise((resolve) => {
+      cv.onRuntimeInitialized = () => {
+        resolve(true);
+      };
+    });
+  }
 
   async processBuffer(buffer: Uint8Array) {
     this.images++;

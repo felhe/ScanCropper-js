@@ -18,8 +18,14 @@ await build({
   package: {
     // package.json properties
     name: "scan-cropper",
-    version: Deno.args[0],
+    // load version from deno.json
+    version: Deno.readTextFileSync("./deno.json")
+      .match(/"version":\s*"([^"]+)"/)?.[1],
     description: "",
+    browser: {
+      fs: false,
+      path: false,
+    },
     // license: "MIT",
     // repository: {
     //   type: "git",
