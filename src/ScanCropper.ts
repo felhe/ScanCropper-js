@@ -3,89 +3,109 @@ import { Settings } from "./Settings.ts";
 import { Image } from "npm:image-js";
 
 export class ScanCropper {
-  private errors = 0;
   private images = 0;
   private scans = 0;
+  private errors = 0;
 
-  constructor(private settings: Settings) {
-  }
+  // Reusable Mats for the pipeline:
+  private matSrc: cv.Mat | null = null;
+  private matGray: cv.Mat | null = null;
+  private matBin: cv.Mat | null = null;
+  private contours: cv.MatVector | null = null;
+  private hierarchy: cv.Mat | null = null;
+
+  constructor(private settings: Settings) {}
 
   async init() {
-    // Load OpenCV.js
-    await new Promise((resolve) => {
-      cv.onRuntimeInitialized = () => {
-        resolve(true);
-      };
+    return new Promise<void>((resolve) => {
+      cv.onRuntimeInitialized = () => resolve();
     });
   }
 
   async processBuffer(buffer: Uint8Array) {
     this.images++;
-    // Load the image from a buffer
-    const image = await Image.load(buffer);
 
-    // Ensure the image has an alpha channel and convert to RGBA
-    const rgbaImage = image.rgba8();
-
-    // Access raw pixel data
-    const data = rgbaImage.data;
-    const width = rgbaImage.width;
-    const height = rgbaImage.height;
-
-    // Create an OpenCV Mat from the image data
-    const rgbaMat = cv.matFromImageData(
-      { data: new Uint8ClampedArray(data), width, height },
+    // 1) Load & one‐time RGBA conversion
+    const srcImage = await Image.load(buffer);
+    const rgba = srcImage.rgba8(); // Heavy, only do once
+    const imgData = new ImageData(
+      new Uint8ClampedArray(rgba.data),
+      rgba.width,
+      rgba.height,
     );
 
-    // Convert RGBA to BGR color space
-    const bgr = new cv.Mat();
-    cv.cvtColor(rgbaMat, bgr, cv.COLOR_RGBA2BGR);
-    rgbaMat.delete();
+    // 2) Create source Mat once
+    this.matSrc = cv.matFromImageData(imgData);
 
-    if (bgr.empty()) {
-      console.warn(`Could not decode image`);
-      bgr.delete();
-      return;
+    // 3) Allocate or reuse intermediate Mats
+    this.matGray = this.matGray || new cv.Mat();
+    this.matBin = this.matBin || new cv.Mat();
+    this.contours = this.contours || new cv.MatVector();
+    this.hierarchy = this.hierarchy || new cv.Mat();
+
+    // 4) Blur → Gray → Threshold
+    const blurred = new cv.Mat();
+    try {
+      cv.medianBlur(this.matSrc, blurred, this.settings.blur);
+      cv.cvtColor(blurred, this.matGray, cv.COLOR_BGR2GRAY);
+      cv.threshold(
+        this.matGray,
+        this.matBin,
+        this.settings.thresh,
+        this.settings.maxVal,
+        cv.THRESH_BINARY_INV,
+      );
+    } finally {
+      blurred.delete();
     }
 
-    const scans = this.findScans(bgr);
-    const resultImages: Uint8Array[] = [];
-    for (let i = 0; i < scans.length; i++) {
-      const scan = scans[i];
-      if (scan.empty()) {
-        scan.delete();
+    // 5) Find contours
+    cv.findContours(
+      this.matBin,
+      this.contours,
+      this.hierarchy,
+      cv.RETR_EXTERNAL,
+      cv.CHAIN_APPROX_SIMPLE,
+    );
+
+    // 6) Candidate regions & clipping
+    const regions = this.getCandidateRegions(this.matSrc, this.contours);
+    const scanMats = this.clipScans(this.matSrc, regions);
+
+    // 7) Convert each Mat ROI → Image-JS buffer
+    const outBuffers: Uint8Array[] = [];
+    for (const roi of scanMats) {
+      if (roi.empty()) {
+        roi.delete();
         continue;
       }
       this.scans++;
 
+      // Convert BGR→RGB into a buffer
       const rgb = new cv.Mat();
-      cv.cvtColor(scan, rgb, cv.COLOR_BGR2RGB);
-      scan.delete();
+      cv.cvtColor(roi, rgb, cv.COLOR_BGR2RGB);
+      roi.delete();
 
-      // Create an Image instance from the RGB data
-      const image = new Image(rgb.cols, rgb.rows, {
+      // Build Image-JS from rgb.data without extra copies
+      const img = new Image(rgb.cols, rgb.rows, {
         data: rgb.data,
         components: 3,
         alpha: 0,
       });
-
-      // Save the image to a buffer in the desired format (e.g., PNG)
-      const imgBuffer = image.toBuffer({ format: this.settings.outputFormat });
-
-      resultImages.push(imgBuffer);
-
+      outBuffers.push(img.toBuffer({ format: this.settings.outputFormat }));
       rgb.delete();
     }
 
-    bgr.delete();
+    // 8) Yield so GC can run before next heavy iteration
+    await new Promise((r) => setTimeout(r, 0));
 
-    return resultImages;
+    return outBuffers;
   }
 
   private getCandidateRegions(
     img: cv.Mat,
     contours: cv.MatVector,
-  ) {
+  ): Array<{ box: cv.Mat; rect: cv.RotatedRect; area: number }> {
     const imgArea = img.rows * img.cols;
     const regions: Array<{ box: cv.Mat; rect: cv.RotatedRect; area: number }> =
       [];
@@ -93,14 +113,15 @@ export class ScanCropper {
     for (let i = 0; i < contours.size(); i++) {
       const cnt = contours.get(i);
       const rect = cv.minAreaRect(cnt);
-      // @ts-ignore wrongly typed in opencv-js
-      const pts = cv.RotatedRect.points(rect);
+      // @ts-ignore: points() is incorrectly typed
+      const pts: number[][] = cv.RotatedRect.points(rect);
       const area = rect.size.width * rect.size.height;
 
       if (area > imgArea * 0.03) {
-        const matBox = cv.matFromArray(4, 1, cv.CV_32SC2, pts.flat());
-        regions.push({ box: matBox, rect, area });
+        const box = cv.matFromArray(4, 1, cv.CV_32SC2, pts.flat());
+        regions.push({ box, rect, area });
       }
+
       cnt.delete();
     }
 
@@ -108,11 +129,51 @@ export class ScanCropper {
     return regions;
   }
 
+  private clipScans(
+    img: cv.Mat,
+    regions: ReturnType<ScanCropper["getCandidateRegions"]>,
+  ): cv.Mat[] {
+    const scans: cv.Mat[] = [];
+
+    for (const { box, rect } of regions) {
+      let angle = rect.angle;
+      if (angle < -45) angle += 90;
+
+      // @ts-ignore
+      const pts: { x: number; y: number }[] = cv.RotatedRect.points(rect);
+      const center = this.getCenter(pts);
+
+      let rotated: cv.Mat | null = null;
+      try {
+        rotated = this.rotateImage(img, angle, center);
+
+        const rpts = this.rotatePoints(pts, angle, center);
+        const xs = rpts.map((p) => p.x),
+          ys = rpts.map((p) => p.y);
+
+        const x1 = Math.max(Math.min(...xs), 0),
+          y1 = Math.max(Math.min(...ys), 0),
+          x2 = Math.min(Math.max(...xs), img.cols),
+          y2 = Math.min(Math.max(...ys), img.rows);
+
+        const roiRect = new cv.Rect(x1, y1, x2 - x1, y2 - y1);
+        scans.push(rotated.roi(roiRect));
+      } catch {
+        this.errors++;
+      } finally {
+        box.delete();
+        rotated?.delete();
+      }
+    }
+
+    return scans;
+  }
+
   private rotateImage(
     img: cv.Mat,
     angle: number,
     center: { x: number; y: number },
-  ) {
+  ): cv.Mat {
     const M = cv.getRotationMatrix2D(
       new cv.Point(center.x, center.y),
       angle,
@@ -140,12 +201,13 @@ export class ScanCropper {
     angleDeg: number,
     center: { x: number; y: number },
   ) {
-    const rad = -angleDeg * (Math.PI / 180);
-    const sin = Math.sin(rad);
-    const cos = Math.cos(rad);
+    const rad = -angleDeg * (Math.PI / 180),
+      sin = Math.sin(rad),
+      cos = Math.cos(rad);
+
     return pts.map(({ x, y }) => {
-      const dx = x - center.x;
-      const dy = y - center.y;
+      const dx = x - center.x,
+        dy = y - center.y;
       return {
         x: Math.round(dx * cos - dy * sin + center.x),
         y: Math.round(dx * sin + dy * cos + center.y),
@@ -154,86 +216,11 @@ export class ScanCropper {
   }
 
   private getCenter(pts: Array<{ x: number; y: number }>) {
-    const xs = pts.map((p) => p.x);
-    const ys = pts.map((p) => p.y);
+    const xs = pts.map((p) => p.x),
+      ys = pts.map((p) => p.y);
     return {
       x: (Math.min(...xs) + Math.max(...xs)) / 2,
       y: (Math.min(...ys) + Math.max(...ys)) / 2,
     };
-  }
-
-  private clipScans(
-    img: cv.Mat,
-    regions: ReturnType<typeof this.getCandidateRegions>,
-  ) {
-    const scans: cv.Mat[] = [];
-
-    for (const { box, rect } of regions) {
-      let angle = rect.angle;
-      if (angle < -45) angle += 90;
-
-      // @ts-ignore wrongly typed in opencv-js
-      const pts = cv.RotatedRect.points(rect);
-      const center = this.getCenter(pts);
-
-      let rotatedImg: cv.Mat | null = null;
-      try {
-        rotatedImg = this.rotateImage(img, angle, center);
-        const rotatedPts = this.rotatePoints(pts, angle, center);
-
-        const xs = rotatedPts.map((p) => p.x);
-        const ys = rotatedPts.map((p) => p.y);
-        const x1 = Math.max(Math.min(...xs), 0);
-        const y1 = Math.max(Math.min(...ys), 0);
-        const x2 = Math.min(Math.max(...xs), img.cols);
-        const y2 = Math.min(Math.max(...ys), img.rows);
-
-        const roi = new cv.Rect(x1, y1, x2 - x1, y2 - y1);
-        scans.push(rotatedImg.roi(roi));
-      } catch {
-        this.errors++;
-      } finally {
-        box.delete();
-        rotatedImg?.delete();
-      }
-    }
-
-    return scans;
-  }
-
-  private findScans(img: cv.Mat) {
-    const blurred = new cv.Mat();
-    cv.medianBlur(img, blurred, this.settings.blur);
-
-    const gray = new cv.Mat();
-    cv.cvtColor(blurred, gray, cv.COLOR_BGR2GRAY);
-    blurred.delete();
-
-    const bin = new cv.Mat();
-    cv.threshold(
-      gray,
-      bin,
-      this.settings.thresh,
-      this.settings.maxVal,
-      cv.THRESH_BINARY_INV,
-    );
-    gray.delete();
-
-    const contours = new cv.MatVector();
-    const hierarchy = new cv.Mat();
-    cv.findContours(
-      bin,
-      contours,
-      hierarchy,
-      cv.RETR_EXTERNAL,
-      cv.CHAIN_APPROX_SIMPLE,
-    );
-    bin.delete();
-    hierarchy.delete();
-
-    const regions = this.getCandidateRegions(img, contours);
-    contours.delete();
-
-    return this.clipScans(img, regions);
   }
 }
